@@ -47,6 +47,7 @@ namespace Microsoft.EntityFrameworkCore.Query
             RelationalDependencies = relationalDependencies;
 
             var sqlExpressionFactory = relationalDependencies.SqlExpressionFactory;
+            _queryCompilationContext = queryCompilationContext;
             _model = queryCompilationContext.Model;
             _sqlTranslator = relationalDependencies.RelationalSqlTranslatingExpressionVisitorFactory.Create(queryCompilationContext, this);
             _weakEntityExpandingExpressionVisitor = new WeakEntityExpandingExpressionVisitor(_sqlTranslator, sqlExpressionFactory);
@@ -70,8 +71,8 @@ namespace Microsoft.EntityFrameworkCore.Query
         {
             RelationalDependencies = parentVisitor.RelationalDependencies;
             _queryCompilationContext = parentVisitor._queryCompilationContext;
-            _sqlTranslator = parentVisitor._sqlTranslator;
-            _weakEntityExpandingExpressionVisitor = parentVisitor._weakEntityExpandingExpressionVisitor;
+            _sqlTranslator = RelationalDependencies.RelationalSqlTranslatingExpressionVisitorFactory.Create(parentVisitor._queryCompilationContext, parentVisitor);
+            _weakEntityExpandingExpressionVisitor = new WeakEntityExpandingExpressionVisitor(_sqlTranslator, parentVisitor._sqlExpressionFactory);
             _projectionBindingExpressionVisitor = new RelationalProjectionBindingExpressionVisitor(this, _sqlTranslator);
             _sqlExpressionFactory = parentVisitor._sqlExpressionFactory;
             _subquery = true;
@@ -98,7 +99,7 @@ namespace Microsoft.EntityFrameworkCore.Query
                     var arguments = new List<SqlExpression>();
                     foreach (var arg in tableValuedFunctionQueryRootExpression.Arguments)
                     {
-                        var sqlArgument = _sqlTranslator.Translate(arg);
+                        var sqlArgument = TranslateExpression(arg);
                         if (sqlArgument == null)
                         {
                             var methodCall = Expression.Call(
@@ -106,7 +107,10 @@ namespace Microsoft.EntityFrameworkCore.Query
                                 function.MethodInfo,
                                 tableValuedFunctionQueryRootExpression.Arguments);
 
-                            throw new InvalidOperationException(CoreStrings.TranslationFailed(methodCall.Print()));
+                            throw new InvalidOperationException(
+                                TranslationErrorDetails == null
+                                    ? CoreStrings.TranslationFailed(methodCall.Print())
+                                    : CoreStrings.TranslationFailedWithDetails(methodCall.Print(), TranslationErrorDetails));
                         }
 
                         arguments.Add(sqlArgument);
@@ -469,7 +473,7 @@ namespace Microsoft.EntityFrameworkCore.Query
                     return memberInitExpression.Update(updatedNewExpression, newBindings);
 
                 default:
-                    var translation = _sqlTranslator.Translate(expression);
+                    var translation = TranslateExpression(expression);
                     if (translation == null)
                     {
                         return null;
@@ -1110,7 +1114,16 @@ namespace Microsoft.EntityFrameworkCore.Query
             return source;
         }
 
-        private SqlExpression TranslateExpression(Expression expression) => _sqlTranslator.Translate(expression);
+        private SqlExpression TranslateExpression(Expression expression)
+        {
+            var result = _sqlTranslator.Translate(expression);
+            if (_sqlTranslator.TranslationErrorDetails != null)
+            {
+                ProvideTranslationErrorDetails(_sqlTranslator.TranslationErrorDetails);
+            }
+
+            return result;
+        }
 
         private SqlExpression TranslateLambdaExpression(
             ShapedQueryExpression shapedQueryExpression, LambdaExpression lambdaExpression)
@@ -1140,6 +1153,8 @@ namespace Microsoft.EntityFrameworkCore.Query
                 _sqlTranslator = sqlTranslator;
                 _sqlExpressionFactory = sqlExpressionFactory;
             }
+
+            public string TranslationErrorDetails => _sqlTranslator.TranslationErrorDetails;
 
             public Expression Expand(SelectExpression selectExpression, Expression lambdaBody)
             {
